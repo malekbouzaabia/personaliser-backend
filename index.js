@@ -1,204 +1,135 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); // Pour hasher les mots de passe
-const jwt = require('jsonwebtoken'); // Pour générer les JWT
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const cors = require('cors');
-require('dotenv').config();
+const path = require('path');
+const fs = require('fs'); // au cas où tu l'utilises plus tard
 
-const app = express();
+const app = express(); // Doit être déclaré AVANT app.use
 
-// Importation des modèles
-const User = require('./modeles/user');           // Assure-toi que ton modèle User est correct
-const TShirt = require('./modeles/t-shirt');        // Assure-toi d'importer ton modèle TShirt
-const Order = require('./modeles/order');
+// Configuration de base
+const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/monprojet';
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 
-// Middleware
+// __dirname est déjà disponible dans CommonJS, pas besoin de fileURLToPath
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// 🔹 TEST d'image directe
+app.get('/test', (req, res) => {
+  res.sendFile(path.join(__dirname, 'uploads', 'image-1743972143126-300602170.png'));
+});
+
+// Middlewares
 app.use(cors());
-app.use(express.json()); // Pour parser le JSON dans les requêtes
+app.use(express.json());
 
-// Connexion à MongoDB avec l'URI "monprojet"
-const mongoURI = process.env.MONGO_URI || 'mongodb://localhost:27017/monprojet';
-mongoose.connect(mongoURI)
-  .then(() => console.log('Connexion à MongoDB réussie'))
-  .catch((error) => console.log('Erreur de connexion à MongoDB:', error));
+// Connexion à MongoDB
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('✅ Connexion à MongoDB réussie'))
+  .catch(err => {
+    console.error('❌ Erreur de connexion à MongoDB:', err);
+    process.exit(1);
+  });
 
-// Route POST pour créer un utilisateur (Sign Up)
-app.post('/api/users', async (req, res) => {
-  const { name, email, password } = req.body;
+// Modèles
+const User = require('./modeles/user');
+const Produit = require('./modeles/produit');
 
+// Enregistrement
+app.post('/api/register', async (req, res) => {
   try {
-    // Vérifier le format de l'email avec une regex simple
-    const emailRegex = /^\S+@\S+\.\S+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ message: 'L\'adresse email est invalide' });
+    const { name, email, password } = req.body;
+
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      return res.status(400).json({ message: 'Format d\'email invalide' });
     }
 
-    // Vérifier si l'utilisateur existe déjà
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'L\'utilisateur existe déjà' });
+    if (await User.findOne({ email })) {
+      return res.status(409).json({ message: 'Email déjà utilisé' });
     }
 
-    // Validation du mot de passe : minimum 8 caractères, au moins une majuscule, un chiffre et un caractère spécial
-    const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-    if (!passwordRegex.test(password)) {
+    if (!/^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/.test(password)) {
       return res.status(400).json({
-        message: 'Le mot de passe doit comporter au moins 8 caractères, une majuscule, un chiffre et un caractère spécial'
+        message: 'Le mot de passe doit contenir 8+ caractères, une majuscule, un chiffre et un caractère spécial'
       });
     }
 
-    // Hasher le mot de passe
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
+    const newUser = await User.create({ name, email, password: hashedPassword });
 
-    // Créer un nouvel utilisateur avec le mot de passe hashé
-    const newUser = new User({
-      name,
-      email,
-      password: hashedPassword
-    });
-
-    // Sauvegarder l'utilisateur dans la base de données
-    await newUser.save();
-
-    // Créer un token JWT
     const token = jwt.sign(
       { userId: newUser._id, email: newUser.email },
-      'secretKey', // Pense à sécuriser ta clé dans une variable d'environnement
+      JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    // Répondre avec le message de succès et le token
     res.status(201).json({
       message: 'Utilisateur créé avec succès',
-      user: {
-        name: newUser.name,
-        email: newUser.email
-      },
+      user: { name: newUser.name, email: newUser.email },
       token
     });
+
   } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la création de l\'utilisateur', error });
+    console.error('Erreur d\'inscription:', error);
+    res.status(500).json({ message: 'Erreur serveur', error: error.message });
   }
 });
 
-
-app.post('/api/users/login', async (req, res) => {
-  const { email, password } = req.body;
-
+// Connexion
+app.post('/api/login', async (req, res) => {
   try {
-    // Vérifier si l'utilisateur existe
-    const user = await User.findOne({ email });  // Recherche par email dans la base de données
-    if (!user) {
-      // Si l'utilisateur n'existe pas, on renvoie une erreur
-      return res.status(400).json({ message: 'Utilisateur non trouvé' });
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ message: 'Identifiants invalides' });
     }
 
-    // Comparer le mot de passe fourni avec celui stocké
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ message: 'Mot de passe incorrect' });
-    }
-
-    // Si l'utilisateur existe et que le mot de passe est correct
-    // Créer un token JWT
     const token = jwt.sign(
       { userId: user._id, email: user.email },
-      'secretKey',  // Choisis une clé secrète sécurisée (et place-la dans un fichier .env)
+      JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    // Répondre avec les informations de l'utilisateur et le token JWT
     res.status(200).json({
       message: 'Connexion réussie',
-      user: {
-        name: user.name,
-        email: user.email
-      },
+      user: { name: user.name, email: user.email },
       token
     });
+
   } catch (error) {
-    console.error("Erreur lors de la connexion:", error);
-    res.status(500).json({ message: 'Erreur lors de la connexion', error });
+    console.error('Erreur de connexion:', error);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-
-
-
-// Route POST pour ajouter un T-shirt avec calcul automatique du prix
-app.post('/api/tshirts', async (req, res) => {
-  const { name, color, size, image, customText, fontColor } = req.body;
-
+// Middleware d'authentification
+const authenticate = (req, res, next) => {
   try {
-    let calculatedPrice = 19.99; // Prix de base
-    if (image) calculatedPrice += 5; // Ajout d'une image
-    if (customText) calculatedPrice += 3; // Ajout de texte personnalisé
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    if (!token) throw new Error('Token manquant');
     
-    const newTShirt = new TShirt({
-      name,
-      price: calculatedPrice,
-      color,
-      size,
-      image,
-      customText,
-      fontColor: fontColor || '#000000' // Couleur par défaut noire si non précisée
-    });
-
-    await newTShirt.save();
-
-    res.status(201).json({
-      message: 'T-shirt ajouté avec succès',
-      tshirt: newTShirt
-    });
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
   } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de l\'ajout du T-shirt', error });
+    res.status(401).json({ message: 'Authentification requise' });
   }
+};
+
+// Routes Produits
+app.use('/api/produits', require('./route/produitRoutes'));
+
+// Gestion des erreurs
+app.use((req, res) => res.status(404).json({ message: 'Route non trouvée' }));
+app.use((err, req, res, next) => {
+  console.error('Erreur:', err.stack);
+  res.status(500).json({ message: 'Erreur serveur' });
 });
 
-// Route GET pour récupérer tous les T-shirts
-app.get('/api/tshirts', async (req, res) => {
-  try {
-    const tshirts = await TShirt.find();
-    res.status(200).json(tshirts);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la récupération des T-shirts', error });
-  }
-});
-
-// Route PUT pour personnaliser un T-shirt (avec l'ID dans l'URL)
-app.put('/api/tshirts/:id', async (req, res) => {
-  const { customText, fontColor } = req.body;
-
-  try {
-    let tshirt = await TShirt.findById(req.params.id);
-    if (!tshirt) {
-      return res.status(404).json({ message: 'T-shirt non trouvé' });
-    }
-
-    if (customText) tshirt.customText = customText;
-    if (fontColor) tshirt.fontColor = fontColor;
-
-    await tshirt.save();
-    res.status(200).json({
-      message: 'T-shirt mis à jour avec succès',
-      tshirt
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la mise à jour du T-shirt', error });
-  }
-});
-
-// Importation et utilisation des routes de commandes
-const orderRoutes = require('./route/order_route');
-app.use('/api/orders', orderRoutes);
-
-// Route de test
-app.get('/', (req, res) => {
-  res.send('API T-Shirt fonctionne !');
-});
-
-// Lancer le serveur sur le port 5000
-const PORT = process.env.PORT || 5000;
+// Lancement du serveur
 app.listen(PORT, () => {
-  console.log('Serveur démarré sur http://localhost:${PORT}');
-})
+  console.log(`🚀 Serveur démarré sur http://localhost:${PORT}`);
+});
