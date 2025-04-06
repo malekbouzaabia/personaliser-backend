@@ -17,10 +17,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 // __dirname est déjà disponible dans CommonJS, pas besoin de fileURLToPath
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// 🔹 TEST d'image directe
-app.get('/test', (req, res) => {
-  res.sendFile(path.join(__dirname, 'uploads', 'image-1743972143126-300602170.png'));
-});
+
 
 // Middlewares
 app.use(cors());
